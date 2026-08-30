@@ -87,7 +87,7 @@ Vector Store
 (Qdrant Local)
 ↓
 LLM Analysis
-(Gemini Flash — Free Tier)
+| LLM | Groq (Llama 3.1) | Free, no billing |
 
 
 ---
@@ -102,7 +102,7 @@ LLM Analysis
 | OCR | Tesseract | Free, runs locally |
 | Embeddings | sentence-transformers | Free, no API needed |
 | Vector Database | Qdrant (local mode) | Production grade, free |
-| LLM | Gemini 1.5 Flash | Free tier available |
+| LLM | Groq (Llama 3.1) | Free, no billing |
 | Package Manager | UV | Fast, modern standard |
 
 ---
