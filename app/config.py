@@ -1,6 +1,6 @@
 # app/config.py
 
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -22,9 +22,11 @@ class Settings(BaseSettings):
     # Vector store settings
     VECTOR_COLLECTION_NAME: str = "clauseguard_docs"
 
-    class Config:
-        env_file = ".env"
-        case_sensitive = True
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        case_sensitive=True,
+        extra="ignore"
+    )
 
 
 # Global instance 

@@ -20,7 +20,7 @@ from langchain_core.messages import SystemMessage, HumanMessage
 from langgraph.graph import StateGraph, START, END
 
 from app.config import settings
-from app.services.pdf_service import extract_text_from_pdf_bytes, PDFProcessingError
+from app.services.pdf_service import extract_text_from_document_bytes, PDFProcessingError
 from app.services.risk_service import analyze_document_risk
 from app.services.vector_service import vector_service
 from app.prompts.analysis import SYSTEM_LEGAL_ANALYST_PROMPT, DOCUMENT_ANALYSIS_PROMPT, CHAT_RAG_PROMPT
@@ -81,22 +81,23 @@ def get_llm(temperature: float = 0.1) -> ChatGroq:
 
 def extract_pdf_node(state: AnalysisState) -> dict:
     """
-    Node 1: Extracts text, page data, and metadata from the raw PDF bytes.
+    Node 1: Extracts text, page data, and metadata from raw document bytes (PDF or Images).
+    Automatically triggers Groq Vision OCR if the document is scanned or an image.
     """
     try:
-        pdf_data = extract_text_from_pdf_bytes(
+        doc_data = extract_text_from_document_bytes(
             file_bytes=state["file_bytes"],
             filename=state["filename"]
         )
         return {
-            "pdf_data": pdf_data,
-            "full_text": pdf_data["full_text"],
-            "is_scanned": pdf_data["is_scanned"],
+            "pdf_data": doc_data,
+            "full_text": doc_data["full_text"],
+            "is_scanned": doc_data["is_scanned"],
             "error": None
         }
     except Exception as exc:
         return {
-            "error": f"PDF Extraction Failed: {str(exc)}",
+            "error": f"Document Extraction Failed: {str(exc)}",
             "full_text": "",
             "is_scanned": False,
             "pdf_data": None
@@ -112,15 +113,15 @@ def rules_risk_node(state: AnalysisState) -> dict:
 
     full_text = state.get("full_text", "")
     if not full_text.strip():
-        # Scanned PDF or empty text
+        # Scanned PDF where OCR also found zero text
         return {
             "rule_analysis": {
                 "score": 0,
                 "level": "LOW",
                 "level_emoji": "🟢",
                 "doc_type": "general",
-                "doc_type_label": "Scanned Document",
-                "advice": "This document appears to be a scanned image with no selectable text.",
+                "doc_type_label": "Unreadable Document",
+                "advice": "No readable text could be extracted from this document or photo.",
                 "warnings": [],
                 "total_issues": 0
             }
@@ -160,12 +161,12 @@ def llm_synthesis_node(state: AnalysisState) -> dict:
         return {"llm_summary": "Analysis could not be generated due to an error in reading the document."}
 
     full_text = state.get("full_text", "")
-    if state.get("is_scanned") or not full_text.strip():
+    if not full_text.strip():
         return {
             "llm_summary": (
-                "### Notice: Scanned Document Detected\n\n"
-                "ClauseGuard could not find selectable text in this PDF. It appears to be a scanned image or photo. "
-                "Please upload a text-selectable PDF or convert your document using an OCR tool."
+                "### Notice: Unreadable Document Detected\n\n"
+                "ClauseGuard could not extract readable text from this file or photo. "
+                "Please ensure the image is clear and well-lit, or upload a text-selectable PDF."
             )
         }
 

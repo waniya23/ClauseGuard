@@ -21,38 +21,38 @@ class DocumentAnalysisResponse(BaseModel):
     doc_id: str = Field(
         ..., 
         description="Unique identifier of the analyzed document",
-        example="doc_98765"
+        examples=["doc_98765"]
     )
     filename: str = Field(
         ..., 
         description="The original name of the analyzed PDF file",
-        example="employment_contract.pdf"
+        examples=["employment_contract.pdf"]
     )
     risk_score: int = Field(
         ..., 
         description="Overall calculated risk score ranging from 0 to 100",
         ge=0,
         le=100,
-        example=65
+        examples=[65]
     )
     risk_level: str = Field(
         ..., 
         description="Categorized risk level of the document (LOW/MEDIUM/HIGH)",
-        example="HIGH"
+        examples=["HIGH"]
     )
-    warnings: List[RiskWarning] = Field(
+    warnings: list[RiskWarning] = Field(
         ..., 
         description="List of specific risk warnings and clauses found in the document"
     )
     summary: str = Field(
         ..., 
         description="A brief executive summary of the document analysis",
-        example="The document contains high-risk clauses including non-compete terms that exceed standard durations."
+        examples=["The document contains high-risk clauses including non-compete terms that exceed standard durations."]
     )
     processing_time_seconds: float = Field(
         ..., 
         description="Time taken to parse and analyze the document in seconds",
-        example=3.72
+        examples=[3.72]
     )
 
 class ChatRequest(BaseModel):
@@ -62,12 +62,12 @@ class ChatRequest(BaseModel):
     doc_id: str = Field(
         ..., 
         description="The unique identifier of the document to query",
-        example="doc_98765"
+        examples=["doc_98765"]
     )
     question: str = Field(
         ..., 
         description="The follow-up question about the document's content or clauses",
-        example="Is there a non-compete clause in this contract?"
+        examples=["Is there a non-compete clause in this contract?"]
     )
 
 class ChatResponse(BaseModel):
@@ -77,10 +77,10 @@ class ChatResponse(BaseModel):
     answer: str = Field(
         ..., 
         description="The AI-generated answer based on the document's context",
-        example="Yes, Section 8 contains a non-compete clause that restricts competition for 24 months post-employment."
+        examples=["Yes, Section 8 contains a non-compete clause that restricts competition for 24 months post-employment."]
     )
     doc_id: str = Field(
         ..., 
         description="The unique identifier of the document associated with the answer",
-        example="doc_98765"
+        examples=["doc_98765"]
     )

@@ -1,88 +1,108 @@
 # app/services/pdf_service.py
 """
-PDF Processing Service for ClauseGuard.
+PDF and Document Ingestion Service for ClauseGuard.
 
 Production Responsibilities:
-1. Validation: Inspect PDF magic bytes (%PDF-), encryption, and page counts.
-2. Extraction: Extract text page-by-page with metadata (crucial for legal citation in RAG).
-3. Text Sanitization: Clean noisy characters, normalize whitespace, fix broken hyphenated line breaks.
-4. Scanned PDF Detection: Detect image-only/scanned documents where selectable text is missing.
+1. Multi-format support: Accepts native PDF, PNG, JPG, and JPEG.
+2. Image to PDF Conversion: Converts single-image uploads into memory PDF streams.
+3. Clean Extraction: Extracts digital text with hyphenation correction and page tracking.
+4. Vision OCR Fallback: Uses Groq Vision (llama-3.2-11b-vision-preview) to transcribe scanned documents.
 """
 
+import base64
+import os
 import re
 import fitz  # PyMuPDF
+from groq import Groq
+from app.config import settings
 
 
 class PDFProcessingError(Exception):
-    """Custom exception raised when PDF extraction or validation fails."""
+    """Custom exception raised when document extraction or validation fails."""
     pass
 
 
-def validate_pdf_bytes(file_bytes: bytes, max_size_mb: int = 10) -> tuple[bool, str]:
-    """
-    Validates PDF file integrity, size, and header.
+def is_image_bytes(file_bytes: bytes) -> bool:
+    """Detects whether binary payload is a standard image (JPEG, PNG, WEBP)."""
+    return (
+        file_bytes.startswith(b"\xff\xd8\xff") or  # JPEG
+        file_bytes.startswith(b"\x89PNG") or       # PNG
+        file_bytes.startswith(b"RIFF")             # WEBP
+    )
 
-    Args:
-        file_bytes: Raw binary content of the uploaded file.
-        max_size_mb: Maximum allowed file size in Megabytes.
+
+def convert_image_bytes_to_pdf_bytes(image_bytes: bytes) -> bytes:
+    """Converts uploaded raw image bytes into a standardized single-page PDF in memory."""
+    try:
+        img_doc = fitz.open(stream=image_bytes)
+        pdf_bytes = img_doc.convert_to_pdf()
+        img_doc.close()
+        return pdf_bytes
+    except Exception as exc:
+        raise PDFProcessingError(f"Could not convert uploaded image to document format: {str(exc)}")
+
+
+def validate_document_bytes(file_bytes: bytes, max_size_mb: int = 10) -> tuple[bool, str, bytes]:
+    """
+    Validates file size, integrity, and normalizes images into PDF streams.
 
     Returns:
-        tuple[bool, str]: (is_valid, error_message). If valid, error_message is empty.
+        tuple[bool, str, bytes]: (is_valid, error_message, normalized_pdf_bytes)
     """
-    # 1. Check file size
+    if len(file_bytes) == 0:
+        return False, "The uploaded file is empty.", b""
+
     size_in_mb = len(file_bytes) / (1024 * 1024)
     if size_in_mb > max_size_mb:
-        return False, f"File size ({size_in_mb:.1f} MB) exceeds maximum limit of {max_size_mb} MB."
+        return False, f"File size ({size_in_mb:.1f} MB) exceeds maximum limit of {max_size_mb} MB.", b""
 
-    if len(file_bytes) == 0:
-        return False, "The uploaded file is completely empty."
+    # Handle image bytes by converting to in-memory PDF
+    if is_image_bytes(file_bytes):
+        try:
+            converted_pdf = convert_image_bytes_to_pdf_bytes(file_bytes)
+            return True, "", converted_pdf
+        except Exception as exc:
+            return False, str(exc), b""
 
-    # 2. Check Magic Bytes (%PDF-)
-    # A genuine PDF file always starts with the bytes %PDF-
+    # Validate PDF signature
     if not file_bytes.startswith(b"%PDF-"):
-        return False, "Invalid file format. File does not start with standard PDF signature."
+        return False, "Unsupported file format. Please upload a PDF, PNG, JPG, or JPEG file.", b""
 
-    # 3. Check readability and encryption with PyMuPDF
+    # Check readability and encryption
     try:
         doc = fitz.open(stream=file_bytes, filetype="pdf")
     except Exception as exc:
-        return False, f"Could not read PDF structure: {str(exc)}"
+        return False, f"Could not read PDF structure: {str(exc)}", b""
 
     if doc.is_encrypted:
         doc.close()
-        return False, "PDF is password protected or encrypted. Please remove password and re-upload."
+        return False, "PDF is password protected. Please remove password and re-upload.", b""
 
     if doc.page_count == 0:
         doc.close()
-        return False, "PDF contains zero pages."
+        return False, "PDF contains zero pages.", b""
 
     doc.close()
-    return True, ""
+    return True, "", file_bytes
 
 
 def clean_text(raw_text: str) -> str:
     """
-    Normalizes extracted raw text for LLM token efficiency and clean regex matching.
-
-    Operations:
-    - Normalizes unicode quotation marks and dashes.
-    - Fixes hyphenated word wraps at line ends (e.g., 'termi-\nnation' -> 'termination').
-    - Collapses excessive newlines and multiple spaces into clean paragraphs.
+    Normalizes text, removes unicode quotation marks, and fixes hyphenated word wraps.
     """
     if not raw_text:
         return ""
 
-    # Replace fancy curly quotes and unicode dashes with standard ascii equivalents
     text = raw_text.replace("“", '"').replace("”", '"').replace("’", "'").replace("‘", "'")
     text = text.replace("—", "-").replace("–", "-")
 
-    # Fix hyphenated words broken across lines: e.g. "employ-\nment" -> "employment"
+    # Fix broken hyphenated words: e.g. "employ-\nment" -> "employment"
     text = re.sub(r'(\w+)-\n(\w+)', r'\1\2', text)
 
-    # Replace multiple horizontal spaces/tabs with a single space
+    # Normalize horizontal whitespace
     text = re.sub(r'[ \t]+', ' ', text)
 
-    # Collapse more than two consecutive newlines into double newlines (paragraphs)
+    # Collapse excessive newlines
     text = re.sub(r'\n{3,}', '\n\n', text)
 
     return text.strip()
@@ -90,10 +110,7 @@ def clean_text(raw_text: str) -> str:
 
 def detect_scanned_pdf(pages_data: list[dict], threshold_chars_per_page: int = 50) -> bool:
     """
-    Detects if the document is a scanned image or photo without an OCR text layer.
-
-    If average text per page is below the threshold, standard text extraction
-    will yield empty results, requiring OCR or user notification.
+    Returns True if average characters per page is below threshold (scanned image or photo).
     """
     if not pages_data:
         return True
@@ -103,62 +120,113 @@ def detect_scanned_pdf(pages_data: list[dict], threshold_chars_per_page: int = 5
     return avg_chars < threshold_chars_per_page
 
 
-def extract_text_from_pdf_bytes(file_bytes: bytes, filename: str = "document.pdf") -> dict:
+def ocr_page_image_with_groq_vision(image_bytes: bytes) -> str:
     """
-    Extracts text page-by-page and aggregates full content with rich metadata.
-
-    Args:
-        file_bytes: Raw binary bytes of the PDF.
-        filename: Original file name.
-
-    Returns:
-        dict: {
-            "filename": str,
-            "page_count": int,
-            "full_text": str,
-            "pages": list[dict],       # [{"page_number": 1, "text": ..., "word_count": ...}]
-            "is_scanned": bool,
-            "total_words": int,
-            "total_chars": int
-        }
+    Uses Groq's Vision LLM (llama-3.2-11b-vision-preview) to transcribe scanned document pages.
+    Free, fast, and does not require local C++ tesseract installation.
     """
-    is_valid, error_msg = validate_pdf_bytes(file_bytes)
+    if not settings.GROQ_API_KEY:
+        return ""
+
+    try:
+        client = Groq(api_key=settings.GROQ_API_KEY)
+        base64_image = base64.b64encode(image_bytes).decode("utf-8")
+
+        response = client.chat.completions.create(
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": (
+                                "Transcribe all visible text from this contract or legal document image verbatim. "
+                                "Preserve the original wording, clauses, and structure. "
+                                "Return ONLY the transcribed text. Do not add preamble, greetings, or commentary."
+                            )
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{base64_image}"
+                            }
+                        }
+                    ]
+                }
+            ],
+            model="llama-3.2-11b-vision-preview",
+            temperature=0.1
+        )
+        return response.choices[0].message.content or ""
+    except Exception as exc:
+        print(f"[Warning] Groq Vision OCR failed: {exc}")
+        return ""
+
+
+def extract_text_from_document_bytes(file_bytes: bytes, filename: str = "document.pdf") -> dict:
+    """
+    Extracts text page-by-page. If pages have no digital text layer, triggers Groq Vision OCR.
+    """
+    is_valid, error_msg, normalized_pdf_bytes = validate_document_bytes(file_bytes)
     if not is_valid:
         raise PDFProcessingError(error_msg)
 
     try:
-        doc = fitz.open(stream=file_bytes, filetype="pdf")
+        doc = fitz.open(stream=normalized_pdf_bytes, filetype="pdf")
     except Exception as exc:
-        raise PDFProcessingError(f"Failed to parse PDF document: {str(exc)}")
+        raise PDFProcessingError(f"Failed to parse document: {str(exc)}")
 
     pages: list[dict] = []
     full_text_chunks: list[str] = []
     total_words = 0
     total_chars = 0
 
+    # 1. First pass: Digital text extraction
     for page_idx in range(doc.page_count):
         page = doc.load_page(page_idx)
-        raw_page_text = page.get_text("text")
-        cleaned_page_text = clean_text(raw_page_text)
+        raw_text = page.get_text("text")
+        cleaned = clean_text(raw_text)
 
-        word_count = len(cleaned_page_text.split()) if cleaned_page_text else 0
-        char_count = len(cleaned_page_text)
+        word_count = len(cleaned.split()) if cleaned else 0
+        char_count = len(cleaned)
 
         pages.append({
-            "page_number": page_idx + 1,  # 1-indexed for human readability
-            "text": cleaned_page_text,
+            "page_number": page_idx + 1,
+            "text": cleaned,
             "word_count": word_count,
             "char_count": char_count,
+            "_fitz_page_idx": page_idx
         })
 
-        if cleaned_page_text:
-            full_text_chunks.append(cleaned_page_text)
-            total_words += word_count
-            total_chars += char_count
+    is_scanned = detect_scanned_pdf(pages)
+
+    # 2. Second pass: If document is scanned/photo, use Groq Vision OCR
+    if is_scanned:
+        print("[Info] Scanned document or photo detected. Triggering Groq Vision OCR...")
+        for p in pages:
+            # Render page to high-res PNG image for Vision API
+            page_obj = doc.load_page(p["_fitz_page_idx"])
+            pixmap = page_obj.get_pixmap(dpi=150)
+            page_png_bytes = pixmap.tobytes("png")
+
+            ocr_transcription = ocr_page_image_with_groq_vision(page_png_bytes)
+            cleaned_ocr = clean_text(ocr_transcription)
+
+            if cleaned_ocr:
+                p["text"] = cleaned_ocr
+                p["word_count"] = len(cleaned_ocr.split())
+                p["char_count"] = len(cleaned_ocr)
+
+    # Cleanup temp internal reference and aggregate full text
+    for p in pages:
+        p.pop("_fitz_page_idx", None)
+        if p["text"]:
+            full_text_chunks.append(p["text"])
+            total_words += p["word_count"]
+            total_chars += p["char_count"]
 
     doc.close()
 
-    is_scanned = detect_scanned_pdf(pages)
     aggregated_full_text = "\n\n".join(full_text_chunks)
 
     return {
